@@ -6,7 +6,7 @@
       "type": "toy-ruby",
       "request": "launch",
       "program": "${workspaceFolder}/program.rb",
-      "stopOnEntry": true
+      "stopOnEntry": false
     }
   ]
 }

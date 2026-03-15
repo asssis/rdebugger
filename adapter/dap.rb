@@ -35,6 +35,24 @@ state = { # estado do debugger
   program_path: nil, # caminho do programa atual
   lines: [], # linhas do programa
   current_line: 1, # linha atual
+  execution_phase: :runtime, # fase atual (:plan, :runtime)
+  execution_plan_lines: [], # cronograma de mapeamento (classes -> métodos)
+  execution_plan_index: -1, # índice atual dentro do cronograma
+  first_runtime_line: 1, # primeira linha executável no top-level
+  class_map: [], # mapa estrutural de classes
+  method_map: [], # mapa estrutural de métodos
+  method_definitions: {}, # mapeia nome do método para linha do def
+  method_ranges: {}, # mapeia método para faixa {def_line, body_start, end_line}
+  methods_by_name: Hash.new { |h, k| h[k] = [] }, # índice de métodos por nome
+  methods_by_owner: {}, # índice de métodos por "Classe#metodo"
+  line_in_method_body: Set.new, # linhas que pertencem ao corpo de métodos
+  line_in_class_body: Set.new, # linhas que pertencem ao corpo de classes
+  non_exec_top_level_lines: Set.new, # linhas que não devem executar no top-level (ex: def dentro de class)
+  call_stack: [], # pilha simples de retorno para stepIn/stepOut
+  top_locals: {}, # variáveis simples do contexto top-level
+  objects: {}, # objetos simulados por id
+  next_object_id: 1, # sequencial para ids de objetos simulados
+  object_var_ref_base: 1000, # faixa de variablesReference para objetos
   breakpoints: Hash.new { |h, k| h[k] = Set.new }, # breakpoints por arquivo
   stop_on_entry: true, # parar ao iniciar
   terminated: false # flag de término
@@ -119,7 +137,154 @@ load_program = lambda do |program_path| # carrega o programa
   lines = content.split(/\r?\n/) # separa em linhas
   lines = [''] if lines.empty? # garante pelo menos uma linha
   state[:lines] = lines # guarda linhas
-  state[:current_line] = 1 # reseta linha atual
+  state[:current_line] = 1 # valor temporário (ajustado abaixo)
+  state[:execution_phase] = :runtime # valor padrão
+  state[:execution_plan_lines] = [] # limpa cronograma
+  state[:execution_plan_index] = -1 # reseta índice do cronograma
+  state[:first_runtime_line] = 1 # valor padrão
+  state[:class_map] = [] # limpa mapa de classes
+  state[:method_map] = [] # limpa mapa de métodos
+  state[:call_stack] = [] # limpa pilha de chamadas
+  state[:top_locals] = {} # limpa variáveis top-level
+  state[:objects] = {} # limpa objetos simulados
+  state[:next_object_id] = 1 # reseta ids de objeto
+  state[:method_definitions] = {} # limpa índice de métodos
+  state[:method_ranges] = {} # limpa faixas de métodos
+  state[:methods_by_name] = Hash.new { |h, k| h[k] = [] } # limpa índice por nome
+  state[:methods_by_owner] = {} # limpa índice por owner
+  state[:line_in_method_body] = Set.new # limpa marcação de linhas de método
+  state[:line_in_class_body] = Set.new # limpa marcação de linhas de classe
+  state[:non_exec_top_level_lines] = Set.new # limpa linhas não executáveis no top-level
+
+  block_stack = [] # pilha simples para parear def/end
+  lines.each_with_index do |raw_line, idx| # indexa defs para stepIn
+    line_no = idx + 1 # linha 1-based
+    stripped = raw_line.sub(/#.*$/, '').strip # remove comentário de fim de linha
+
+    if (match = /^def\s+([a-zA-Z_]\w*[!?=]?)(?:\(([^)]*)\))?/.match(stripped)) # início de método
+      owner_class = block_stack.reverse.find { |item| item[:type] == 'class' }&.dig(:name) # classe dona do método
+      params = match[2].to_s.split(',').map { |p| p.strip }.reject(&:empty?) # parâmetros simples
+      block_stack << { type: 'def', name: match[1], line: line_no, owner_class: owner_class, params: params } # empilha def
+      state[:non_exec_top_level_lines].add(line_no) if owner_class # top-level não deve parar em def de classe
+      next
+    end
+
+    if (match = /^class\s+([A-Z]\w*(?:::[A-Z]\w*)*)/.match(stripped)) # início de classe
+      block_stack << { type: 'class', name: match[1], line: line_no } # empilha classe nomeada
+      state[:non_exec_top_level_lines].add(line_no) # class não é executável no runtime
+      next
+    end
+
+    if /^(module|if|unless|case|begin|while|until|for)\b/.match?(stripped) # outros blocos
+      block_stack << { type: 'block', line: line_no } # empilha bloco genérico
+      next
+    end
+
+    next unless stripped == 'end' # só trata fechamento explícito com "end"
+
+    opener = block_stack.pop # desempilha último bloco
+    next unless opener
+
+    if opener[:type] == 'def' # fechamento de método
+      method_name = opener[:name] # nome do método
+      def_line = opener[:line] # linha do def
+      owner_class = opener[:owner_class] # classe dona do método (nil para top-level)
+      params = opener[:params] || [] # parâmetros do método
+      body_start = def_line + 1 # início do corpo
+      end_line = line_no # linha do end
+
+      state[:method_definitions][method_name] = def_line unless state[:method_definitions].key?(method_name)
+      method_info = { # metadados do método
+        name: method_name,
+        owner_class: owner_class,
+        scope: owner_class || 'top-level',
+        params: params,
+        def_line: def_line,
+        body_start: body_start,
+        end_line: end_line
+      }
+      state[:method_ranges][method_name] = method_info # mantém compatibilidade com índice antigo
+      state[:methods_by_name][method_name] << method_info # índice por nome
+      state[:methods_by_owner]["#{owner_class}##{method_name}"] = method_info if owner_class # índice por classe
+      state[:method_map] << method_info # adiciona no mapa estrutural de métodos
+
+      (body_start..end_line).each { |l| state[:line_in_method_body].add(l) } # marca corpo do método
+      next
+    end
+
+    if opener[:type] == 'class' # fechamento de classe
+      class_info = { # metadados da classe
+        name: opener[:name],
+        line_start: opener[:line],
+        line_end: line_no,
+        scope: 'top-level'
+      }
+      state[:class_map] << class_info # adiciona no mapa estrutural de classes
+      ((opener[:line] + 1)..line_no).each { |l| state[:line_in_class_body].add(l) } # marca corpo da classe
+    end
+  end
+
+  # Runtime inicia na primeira chamada de método ou Classe.new no top-level
+  first_runtime = nil
+  simulated_top_locals = {}
+  line_no = 1
+  while line_no <= state[:lines].length
+    raw_text = state[:lines][line_no - 1] || ''
+    text = raw_text.sub(/#.*$/, '').strip
+    top_level_line = !state[:line_in_method_body].include?(line_no) &&
+      !state[:line_in_class_body].include?(line_no) &&
+      !state[:non_exec_top_level_lines].include?(line_no)
+
+    if top_level_line && !text.empty? && !text.start_with?('class ') && !text.start_with?('def ') && text != 'end'
+      has_call = false
+
+      if (ctor = /([A-Z]\w*(?:::[A-Z]\w*)*)\.new\s*(?:\(|$)/.match(text))
+        # Instanciação é chamada de método mesmo sem initialize mapeado
+        has_call = true
+      elsif (recv_any = /([a-z_]\w*)\.([a-zA-Z_]\w*[!?=]?)/.match(text))
+        # Chamada com receiver também conta como "método" para início
+        has_call = true
+      elsif !text.match?(/^[a-z_]\w*\s*=/) &&
+          (plain = /^([a-zA-Z_]\w*[!?=]?)(?=\s|\(|$)/.match(text))
+        # Chamada sem receiver (ex: puts "Hello"), ignorando palavras-chave
+        ruby_keywords = %w[class module def end if elsif else unless while until for case when do begin rescue ensure return]
+        has_call = !ruby_keywords.include?(plain[1])
+      end
+
+      first_runtime = line_no if has_call && first_runtime.nil?
+
+      if (assign = /^([a-z_]\w*)\s*=\s*([A-Z]\w*(?:::[A-Z]\w*)*)\.new\b/.match(text))
+        simulated_top_locals[assign[1]] = assign[2]
+      end
+    end
+
+    line_no += 1
+  end
+
+  # Fallback quando não houver chamada de método clara
+  if first_runtime.nil?
+    first_runtime = 1
+    while first_runtime <= state[:lines].length
+      text = (state[:lines][first_runtime - 1] || '').strip
+      top_level_line = !state[:line_in_method_body].include?(first_runtime) &&
+        !state[:line_in_class_body].include?(first_runtime) &&
+        !state[:non_exec_top_level_lines].include?(first_runtime)
+      executable = top_level_line &&
+        !text.empty? &&
+        !text.start_with?('#') &&
+        !text.start_with?('class ') &&
+        !text.start_with?('def ') &&
+        text != 'end'
+      break if executable
+      first_runtime += 1
+    end
+  end
+
+  state[:execution_phase] = :runtime
+  state[:execution_plan_lines] = []
+  state[:execution_plan_index] = -1
+  state[:first_runtime_line] = [first_runtime, state[:lines].length].min
+  state[:current_line] = state[:first_runtime_line]
 end # fim do load_program
 
 breakpoints_for_program = lambda do # obtém breakpoints do programa
@@ -134,37 +299,407 @@ find_next_breakpoint = lambda do |start_line| # acha próximo breakpoint
   nil # nenhum encontrado
 end # fim do find_next_breakpoint
 
+# Forward declaration para evitar NameError por ordem de definição
+advance_execution = nil
+
 continue_execution = lambda do |include_current| # continua execução
   return if state[:program_path].nil? || state[:terminated] # guarda estado inválido
 
-  start = include_current ? state[:current_line] : state[:current_line] + 1 # linha inicial
-  next_bp = find_next_breakpoint.call(start) # próximo breakpoint
-  if next_bp # se achou
-    state[:current_line] = next_bp # move para breakpoint
-    send_stopped.call('breakpoint') # emite stopped
-    return # encerra
-  end # fim do if
+  program_bps = state[:breakpoints][state[:program_path]] || Set.new # breakpoints do arquivo atual
+  if include_current && program_bps.include?(state[:current_line]) # respeita breakpoint na linha atual
+    send_stopped.call('breakpoint')
+    return
+  end
 
-  if state[:lines].empty? # se não há linhas
-    send_terminated.call # termina sessão
-    return # encerra
-  end # fim do if empty
+  # Executa direto em runtime (mapeamento já foi feito no carregamento)
+  while true
+    moved = advance_execution.call(true)
+    break unless moved
 
-  state[:current_line] = state[:lines].length # vai para última linha
-  send_terminated.call # termina sessão
+    if program_bps.include?(state[:current_line]) # para no primeiro breakpoint alcançado
+      send_stopped.call('breakpoint')
+      return
+    end
+  end
 end # fim do continue
 
 step_one = lambda do # step de uma linha
   return if state[:program_path].nil? || state[:terminated] # guarda estado inválido
 
-  if state[:current_line] >= state[:lines].length # se está no fim
-    send_terminated.call # termina sessão
-    return # encerra
-  end # fim do if
+  # Implementado abaixo via advance_execution (step over realista)
+end # fim do step (placeholder)
 
-  state[:current_line] += 1 # avança linha
-  send_stopped.call('step') # emite stopped
-end # fim do step
+extract_called_method = lambda do |line_text| # extrai método chamado da linha atual
+  text = line_text.to_s.strip # normaliza
+  return nil if text.empty? || text.start_with?('#') # ignora vazio/comentário
+
+  # Caso mais simples: chamada "foo" ou "foo(...)"
+  if (m = /^([a-zA-Z_]\w*[!?=]?)\s*(?:\(|$)/.match(text))
+    return m[1]
+  end
+
+  # Chamada com receiver: obj.foo(...) -> tenta último método da cadeia
+  chain = text.scan(/\.([a-zA-Z_]\w*[!?=]?)\s*(?=\(|$)/).flatten
+  chain.last
+end # fim do extract_called_method
+
+current_locals = lambda do # devolve variáveis do frame atual ou do top-level
+  frame = state[:call_stack].last
+  frame ? frame[:locals] : state[:top_locals]
+end # fim do current_locals
+
+current_self_object_id = lambda do # objeto "self" do frame atual
+  frame = state[:call_stack].last
+  frame ? frame[:self_object_id] : nil
+end # fim do current_self_object_id
+
+object_ref = lambda do |object_id| # referência leve de objeto simulado
+  { type: 'object_ref', id: object_id }
+end # fim do object_ref
+
+is_object_ref = lambda do |value| # verifica referência de objeto
+  value.is_a?(Hash) && value[:type] == 'object_ref' && value[:id].is_a?(Integer)
+end # fim do is_object_ref
+
+format_value = lambda do |value| # formata valores para painel de variáveis
+  if is_object_ref.call(value)
+    obj = state[:objects][value[:id]]
+    class_name = obj ? obj[:class_name] : 'Object'
+    return "#<#{class_name}:#{value[:id]}>"
+  end
+
+  return value.inspect if value.is_a?(String)
+  return value.to_s if value.is_a?(Numeric)
+  return value.inspect if value == true || value == false
+  return 'nil' if value.nil?
+
+  value.to_s
+end # fim do format_value
+
+object_variables_reference = lambda do |object_id| # transforma id em variablesReference estável
+  state[:object_var_ref_base] + object_id
+end # fim do object_variables_reference
+
+object_id_from_reference = lambda do |variables_reference| # resolve id do objeto a partir do ref
+  object_id = variables_reference.to_i - state[:object_var_ref_base]
+  return nil if object_id <= 0
+
+  state[:objects].key?(object_id) ? object_id : nil
+end # fim do object_id_from_reference
+
+resolve_variable_value = lambda do |token, locals, self_obj_id| # resolve token simples para valor
+  key = token.to_s.strip
+  return nil if key.empty?
+  return key[1..-2] if key.start_with?('"') && key.end_with?('"')
+  return key.to_i if /\A-?\d+\z/.match?(key)
+
+  if key.start_with?('@') # ivar
+    obj = self_obj_id ? state[:objects][self_obj_id] : nil
+    return obj ? obj[:ivars][key] : nil
+  end
+
+  locals[key]
+end # fim do resolve_variable_value
+
+evaluate_expression = lambda do |expression, locals, self_obj_id| # avaliador simples para atribuições
+  expr = expression.to_s.strip
+  return nil if expr.empty?
+  return expr[1..-2] if expr.start_with?('"') && expr.end_with?('"')
+  return expr.to_i if /\A-?\d+\z/.match?(expr)
+
+  if (m = /\A(.+)\s*([\+\-\*\/])\s*(.+)\z/.match(expr)) # operação binária simples
+    left = resolve_variable_value.call(m[1], locals, self_obj_id)
+    right = resolve_variable_value.call(m[3], locals, self_obj_id)
+    return left + right if m[2] == '+' && left.is_a?(Numeric) && right.is_a?(Numeric)
+    return left - right if m[2] == '-' && left.is_a?(Numeric) && right.is_a?(Numeric)
+    return left * right if m[2] == '*' && left.is_a?(Numeric) && right.is_a?(Numeric)
+    return nil if m[2] == '/' && left.is_a?(Numeric) && right.is_a?(Numeric) && right.zero?
+    return left / right if m[2] == '/' && left.is_a?(Numeric) && right.is_a?(Numeric)
+  end
+
+  resolve_variable_value.call(expr, locals, self_obj_id)
+end # fim do evaluate_expression
+
+parse_arguments = lambda do |args_text, locals, self_obj_id| # parse simples de argumentos "(a, b, 1)"
+  text = args_text.to_s.strip
+  return [] if text.empty?
+
+  text.split(',').map { |raw| evaluate_expression.call(raw.strip, locals, self_obj_id) }
+end # fim do parse_arguments
+
+apply_line_effects = lambda do |line_text| # efeitos simples de execução para auxiliar resolução de calls
+  text = line_text.to_s.sub(/#.*$/, '').strip
+  return if text.empty?
+
+  locals = current_locals.call
+  self_obj_id = current_self_object_id.call
+
+  if (compound_local = /^([a-z_]\w*)\s*([\+\-\*\/])=\s*(.+)$/.match(text)) # x += 1
+    var_name = compound_local[1]
+    op = compound_local[2]
+    rhs = evaluate_expression.call(compound_local[3], locals, self_obj_id)
+    current = locals[var_name]
+    locals[var_name] =
+      if op == '+' && current.is_a?(Numeric) && rhs.is_a?(Numeric) then current + rhs
+      elsif op == '-' && current.is_a?(Numeric) && rhs.is_a?(Numeric) then current - rhs
+      elsif op == '*' && current.is_a?(Numeric) && rhs.is_a?(Numeric) then current * rhs
+      elsif op == '/' && current.is_a?(Numeric) && rhs.is_a?(Numeric) && rhs != 0 then current / rhs
+      else current
+      end
+    return
+  end
+
+  if (compound_ivar = /^@([a-z_]\w*)\s*([\+\-\*\/])=\s*(.+)$/.match(text)) # @base += value
+    obj = self_obj_id ? state[:objects][self_obj_id] : nil
+    return unless obj
+
+    key = "@#{compound_ivar[1]}"
+    op = compound_ivar[2]
+    rhs = evaluate_expression.call(compound_ivar[3], locals, self_obj_id)
+    current = obj[:ivars][key]
+    obj[:ivars][key] =
+      if op == '+' && current.is_a?(Numeric) && rhs.is_a?(Numeric) then current + rhs
+      elsif op == '-' && current.is_a?(Numeric) && rhs.is_a?(Numeric) then current - rhs
+      elsif op == '*' && current.is_a?(Numeric) && rhs.is_a?(Numeric) then current * rhs
+      elsif op == '/' && current.is_a?(Numeric) && rhs.is_a?(Numeric) && rhs != 0 then current / rhs
+      else current
+      end
+    log_line.call("EXECUTE LINHA: #{text}")
+    return
+  end
+
+  if (assign_ivar = /^@([a-z_]\w*)\s*=\s*(.+)$/.match(text)) # @base = base
+    obj = self_obj_id ? state[:objects][self_obj_id] : nil
+    return unless obj
+
+    key = "@#{assign_ivar[1]}"
+    value = evaluate_expression.call(assign_ivar[2], locals, self_obj_id)
+    obj[:ivars][key] = value
+    log_line.call("EXECUTE LINHA: #{text}")
+    return
+  end
+
+  if (assign_local = /^([a-z_]\w*)\s*=\s*(.+)$/.match(text)) # x = expr
+    locals[assign_local[1]] = evaluate_expression.call(assign_local[2], locals, self_obj_id)
+    return
+  end
+
+  # Leitura de ivar em expressão sem atribuição (ex: @base) não muda estado
+end # fim do apply_line_effects
+
+resolve_call_target = lambda do |line_text| # resolve alvo de call para stepIn/continue
+  text = line_text.to_s.sub(/#.*$/, '').strip
+  return nil if text.empty?
+
+  locals = current_locals.call
+
+  # Construtor: Classe.new(...) entra em Classe#initialize
+  if (ctor = /([A-Z]\w*(?:::[A-Z]\w*)*)\.new\s*(?:\(|$)/.match(text))
+    owner = ctor[1]
+    initialize_target = state[:methods_by_owner]["#{owner}#initialize"]
+    return initialize_target if initialize_target
+  end
+
+  # Prioriza chamadas com receiver em qualquer ponto da expressão (ex: puts obj.teste)
+  if (recv_any = /([a-z_]\w*)\.([a-zA-Z_]\w*[!?=]?)/.match(text))
+    var_name = recv_any[1]
+    method_name = recv_any[2]
+    owner_value = locals[var_name]
+    owner = if is_object_ref.call(owner_value)
+      state[:objects].dig(owner_value[:id], :class_name)
+    else
+      owner_value
+    end
+    return state[:methods_by_owner]["#{owner}##{method_name}"] if owner
+    list = state[:methods_by_name][method_name]
+    return list.first if list && !list.empty?
+  end
+
+  # Encadeado com construtor: Classe.new.metodo(...)
+  if (chain = /([A-Z]\w*(?:::[A-Z]\w*)*)\.new\.([a-zA-Z_]\w*[!?=]?)\s*(?:\(|$)/.match(text))
+    owner = chain[1]
+    method_name = chain[2]
+    target = state[:methods_by_owner]["#{owner}##{method_name}"]
+    return target if target
+  end
+
+  # Chamada com receiver variável: obj.metodo(...)
+  if (recv = /^([a-z_]\w*)\.([a-zA-Z_]\w*[!?=]?)\s*(?:\(|$)/.match(text))
+    var_name = recv[1]
+    method_name = recv[2]
+    owner_value = locals[var_name]
+    owner = if is_object_ref.call(owner_value)
+      state[:objects].dig(owner_value[:id], :class_name)
+    else
+      owner_value
+    end
+    return state[:methods_by_owner]["#{owner}##{method_name}"] if owner
+    list = state[:methods_by_name][method_name]
+    return list.first if list && !list.empty?
+  end
+
+  # Chamada sem receiver: metodo(...)
+  unless text.match?(/^[a-z_]\w*\s*=/) # evita tratar lado esquerdo de assignment como chamada
+    if (plain = /^([a-zA-Z_]\w*[!?=]?)\s*(?:\(|$)/.match(text))
+      list = state[:methods_by_name][plain[1]]
+      return list.find { |m| m[:owner_class].nil? } || (list && list.first)
+    end
+  end
+
+  nil
+end # fim do resolve_call_target
+
+line_executable = lambda do |line_no, allow_method_body| # valida se linha é executável no contexto
+  return false if line_no < 1 || line_no > state[:lines].length
+
+  text = (state[:lines][line_no - 1] || '').strip
+  return false if text.empty? || text.start_with?('#') # ignora vazio/comentário
+  return false if text.start_with?('class ') || text.start_with?('def ') # class/def não executam no runtime
+  return false if text == 'end' # ignora fechamento puro
+  if !allow_method_body &&
+      (state[:line_in_method_body].include?(line_no) ||
+      state[:line_in_class_body].include?(line_no) ||
+      state[:non_exec_top_level_lines].include?(line_no))
+    return false # top-level não executa corpo de método/classe nem linhas estruturais
+  end
+
+  true
+end # fim do line_executable
+
+next_executable_line = lambda do |start_line, allow_method_body, max_line = nil| # busca próxima linha executável
+  upper = max_line || state[:lines].length
+  line_no = start_line
+  while line_no <= upper
+    return line_no if line_executable.call(line_no, allow_method_body)
+    line_no += 1
+  end
+  nil
+end # fim do next_executable_line
+
+advance_execution = lambda do |enter_calls| # avança execução respeitando contexto (top-level/método)
+  return false if state[:program_path].nil? || state[:terminated]
+
+  current = state[:current_line]
+  frame = state[:call_stack].last # frame atual do método (se houver)
+  allow_method_body = !frame.nil?
+
+  # Se já está no "end" do método, o próximo passo é retornar ao caller
+  if frame && current == frame[:end_line]
+    finished = state[:call_stack].pop
+    if finished[:return_line]
+      state[:current_line] = finished[:return_line]
+      return true
+    end
+
+    send_terminated.call
+    return false
+  end
+
+  # stepIn/continue: se linha atual chama método conhecido, entra no corpo
+  line_text = state[:lines][current - 1] || ''
+  called_range = resolve_call_target.call(line_text)
+  constructor_call = line_text.match?(/[A-Z]\w*(?:::[A-Z]\w*)*\.new\s*(?:\(|$)/) # regra: todo new entra em initialize
+
+  if (enter_calls || constructor_call) && called_range
+    caller_locals = current_locals.call # locals de quem fez a chamada
+    caller_self_object_id = current_self_object_id.call
+    call_self_object_id = nil # self do método chamado
+    arg_values = [] # argumentos avaliados
+
+    if (ctor_match = /^(?:([a-z_]\w*)\s*=\s*)?([A-Z]\w*(?:::[A-Z]\w*)*)\.new\s*(?:\((.*)\))?/.match(line_text))
+      assign_var = ctor_match[1]
+      class_name = ctor_match[2]
+      args_text = ctor_match[3]
+
+      object_id = state[:next_object_id]
+      state[:next_object_id] += 1
+      state[:objects][object_id] = { class_name: class_name, ivars: {} }
+      caller_locals[assign_var] = object_ref.call(object_id) if assign_var
+
+      call_self_object_id = object_id
+      arg_values = parse_arguments.call(args_text, caller_locals, caller_self_object_id)
+    elsif (recv_match = /([a-z_]\w*)\.([a-zA-Z_]\w*[!?=]?)\s*(?:\((.*)\))?/.match(line_text))
+      receiver_value = caller_locals[recv_match[1]]
+      call_self_object_id = receiver_value[:id] if is_object_ref.call(receiver_value)
+      arg_values = parse_arguments.call(recv_match[3], caller_locals, caller_self_object_id)
+    elsif (plain_match = /^([a-zA-Z_]\w*[!?=]?)\s*(?:\((.*)\))?/.match(line_text))
+      call_self_object_id = caller_self_object_id
+      arg_values = parse_arguments.call(plain_match[2], caller_locals, caller_self_object_id)
+    end
+
+    frame_locals = {}
+    (called_range[:params] || []).each_with_index do |param_name, idx|
+      frame_locals[param_name] = arg_values[idx]
+    end
+
+    return_line = next_executable_line.call(current + 1, allow_method_body, frame ? frame[:end_line] : nil)
+    state[:call_stack] << {
+      method_name: called_range[:name],
+      class_name: called_range[:owner_class],
+      end_line: called_range[:end_line],
+      return_line: return_line,
+      locals: frame_locals,
+      self_object_id: call_self_object_id
+    }
+
+    body_end = called_range[:end_line] - 1 # ignora linha do "end"
+    first_body_line = next_executable_line.call(called_range[:body_start], true, body_end)
+    if first_body_line
+      state[:current_line] = first_body_line
+      return true
+    end
+
+    # Método vazio: retorna imediatamente para caller
+    finished = state[:call_stack].pop
+    if finished[:return_line]
+      state[:current_line] = finished[:return_line]
+      return true
+    end
+
+    send_terminated.call
+    return false
+  end
+
+  # A linha atual foi executada sem entrar em nova chamada
+  apply_line_effects.call(line_text)
+
+  # Avanço normal (step over) dentro do frame atual
+  max_line = frame ? frame[:end_line] - 1 : nil
+  candidate = next_executable_line.call(current + 1, allow_method_body, max_line)
+  if candidate
+    state[:current_line] = candidate
+    return true
+  end
+
+  # Sem próxima linha executável no frame: para no "end" antes de retornar
+  if frame
+    state[:current_line] = frame[:end_line]
+    return true
+  end
+
+  send_terminated.call
+  false
+end # fim do advance_execution
+
+step_one = lambda do # step over de uma linha executável
+  return if state[:program_path].nil? || state[:terminated]
+
+  moved = advance_execution.call(false)
+
+  if moved
+    send_stopped.call('step')
+  end
+end # fim do step_one
+
+step_in_execution = lambda do # stepIn com tentativa de entrar em método
+  return if state[:program_path].nil? || state[:terminated] # guarda estado inválido
+
+  moved = advance_execution.call(true)
+
+  if moved
+    send_stopped.call('step')
+  end
+end # fim do step_in_execution
 
 handle_request = lambda do |request| # trata request DAP
   case request['command'] # dispatch por comando
@@ -219,20 +754,24 @@ handle_request = lambda do |request| # trata request DAP
     send_response.call(request, {}) # responde vazio
   when 'configurationDone' # configurationDone
     send_response.call(request, {}) # responde
-    if state[:stop_on_entry] # se parar na entrada
-      send_stopped.call('entry') # emite stopped
-    else # senão
-      continue_execution.call(true) # continua
-    end # fim do if
+    # Comportamento estilo Rails: só para quando atingir breakpoint.
+    # Sem breakpoint, executa do início ao fim e termina.
+    continue_execution.call(true)
   when 'threads' # threads
     send_response.call(request, { threads: [{ id: 1, name: 'thread-1' }] }) # thread única
   when 'stackTrace' # stackTrace
     source_path = state[:program_path] || '' # caminho do source
+    frame = state[:call_stack].last # frame atual
+    frame_name = if frame # nome do frame ativo
+      frame[:class_name] ? "#{frame[:class_name]}##{frame[:method_name]}" : frame[:method_name]
+    else
+      'main'
+    end
     send_response.call(request, { # responde stack
       stackFrames: [ # frames
         { # frame único
           id: 1, # id do frame
-          name: 'main', # nome do frame
+          name: frame_name, # nome do frame
           line: state[:current_line], # linha atual
           column: 1, # coluna
           source: { # info do source
@@ -246,31 +785,86 @@ handle_request = lambda do |request| # trata request DAP
   when 'scopes' # scopes
     send_response.call(request, { # responde scopes
       scopes: [ # lista
-        { name: 'Locals', variablesReference: 1, expensive: false } # locals
+        { name: 'Locals', variablesReference: 1, expensive: false }, # locals frame atual
+        { name: 'Globals', variablesReference: 2, expensive: false } # variáveis do top-level
       ] # fim da lista
     }) # responde scopes
   when 'variables' # variables
-    if request.dig('arguments', 'variablesReference') == 1 # locals
+    variables_ref = request.dig('arguments', 'variablesReference').to_i
+    if variables_ref == 1 # locals
       line_text = state[:lines][state[:current_line] - 1] || '' # texto da linha atual
+      frame = state[:call_stack].last
+      locals = current_locals.call
+      vars = [
+        { name: 'line', value: state[:current_line].to_s, variablesReference: 0 },
+        { name: 'text', value: line_text.inspect, variablesReference: 0 }
+      ]
+
+      locals.keys.map(&:to_s).sort.each do |name|
+        value = locals[name]
+        child_ref = is_object_ref.call(value) ? object_variables_reference.call(value[:id]) : 0
+        vars << { name: name, value: format_value.call(value), variablesReference: child_ref }
+      end
+
+      if frame && frame[:self_object_id]
+        obj = state[:objects][frame[:self_object_id]]
+        if obj
+          vars << {
+            name: 'self',
+            value: "#<#{obj[:class_name]}:#{frame[:self_object_id]}>",
+            variablesReference: object_variables_reference.call(frame[:self_object_id])
+          }
+          obj[:ivars].keys.sort.each do |ivar|
+            vars << { name: ivar, value: format_value.call(obj[:ivars][ivar]), variablesReference: 0 }
+          end
+        end
+      end
+
       send_response.call(request, { # responde variables
-        variables: [ # lista
-          { name: 'line', value: state[:current_line].to_s, variablesReference: 0 }, # linha
-          { name: 'text', value: line_text.inspect, variablesReference: 0 } # texto
-        ] # fim da lista
+        variables: vars # lista completa de variáveis mapeadas
       }) # responde
+    elsif variables_ref == 2 # globals/top-level
+      vars = []
+      state[:top_locals].keys.map(&:to_s).sort.each do |name|
+        value = state[:top_locals][name]
+        child_ref = is_object_ref.call(value) ? object_variables_reference.call(value[:id]) : 0
+        vars << { name: name, value: format_value.call(value), variablesReference: child_ref }
+      end
+      send_response.call(request, { variables: vars })
+    elsif (object_id = object_id_from_reference.call(variables_ref)) # expansão de objeto
+      obj = state[:objects][object_id]
+      vars = []
+      if obj
+        vars << { name: '__class__', value: obj[:class_name], variablesReference: 0 }
+        obj[:ivars].keys.sort.each do |ivar|
+          ivar_value = obj[:ivars][ivar]
+          child_ref = is_object_ref.call(ivar_value) ? object_variables_reference.call(ivar_value[:id]) : 0
+          vars << { name: ivar, value: format_value.call(ivar_value), variablesReference: child_ref }
+        end
+      end
+      send_response.call(request, { variables: vars })
     else # outro reference
       send_response.call(request, { variables: [] }) # responde vazio
     end # fim do if
   when 'continue' # continue
     send_response.call(request, { allThreadsContinued: true }) # responde
     continue_execution.call(false) # continua
-  when 'next', 'stepIn' # next/stepIn
+  when 'next' # step over
     send_response.call(request, {}) # responde
     step_one.call # step
+  when 'stepIn' # step into
+    send_response.call(request, {}) # responde
+    step_in_execution.call # tenta entrar no método chamado
   when 'stepOut' # stepOut
     send_response.call(request, {}) # responde
-    state[:current_line] = state[:lines].length # vai pro fim
-    send_terminated.call # termina
+    finished = state[:call_stack].pop # tenta retorno para caller
+    if finished && finished[:return_line]
+      state[:current_line] = finished[:return_line] # volta para linha após a chamada
+      send_stopped.call('step') # mantém sessão ativa
+    else
+      state[:current_line] = state[:lines].length # fallback sem stack
+      send_terminated.call # termina
+    end
   when 'pause' # pause
     send_response.call(request, {}) # responde
     send_stopped.call('pause') # emite stopped
@@ -285,7 +879,12 @@ end # fim do handle_request
 handle_message = lambda do |msg| # trata mensagem
   return unless msg['type'] == 'request' # ignora não-request
 
-  handle_request.call(msg) # delega request
+  begin
+    handle_request.call(msg) # delega request
+  rescue => e
+    log_line.call("ERRO AO PROCESSAR REQUEST #{msg['command']}: #{e.class} - #{e.message}")
+    send_response.call(msg, {}, false, "#{e.class}: #{e.message}") if msg['seq'] && msg['command']
+  end
 end # fim do handle_message
 
 parse_buffer = lambda do # faz parse do buffer
