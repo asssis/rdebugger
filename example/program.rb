@@ -1,47 +1,6 @@
 
-# Classe 1
-class Calculator
-	attr_accessor :base, :history
-
-	def initialize(base)
-		@base = base
-		@history = []
-	end
-
-	def add(value)
-		@base += value
-		@history << @base
-	end
-
-	def add_many(values)
-		for value in values
-			add(value)
-		end
-	end
-
-	def result
-		@base
-	end
-end
-
-# Classe 2
-class Printer
-	attr_accessor :prefix
-
-	def initialize(prefix = "Valor")
-		@prefix = prefix
-	end
-
-	def print_value(value)
-		puts "#{@prefix}: #{value}"
-	end
-
-	def print_history(history)
-		for item in history
-			puts "Historico -> #{item}"
-		end
-	end
-end
+require_relative "calculator"
+require_relative "printer"
 
 # Método de teste
 def test_debugger
@@ -66,6 +25,22 @@ for n in numbers
 	x = x + n
 	puts "x parcial: #{x}"
 end
+
+# Loop com each
+numbers.each do |item|
+	x = x + item
+	puts "x each: #{x}"
+end
+
+# Loop com while
+i = 0
+while i < numbers.length
+	x = x + numbers[i]
+	puts "x while: #{x}"
+	i = i + 1
+end
+
+calc = Calculator.new(10)
 
 puts x
 test_debugger

@@ -45,6 +45,15 @@ state = { # estado do debugger
   method_ranges: {}, # mapeia método para faixa {def_line, body_start, end_line}
   methods_by_name: Hash.new { |h, k| h[k] = [] }, # índice de métodos por nome
   methods_by_owner: {}, # índice de métodos por "Classe#metodo"
+  for_loops_by_start: {}, # mapa de loops "for" por linha inicial
+  for_loops_by_end: {}, # mapa de loops "for" por linha final
+  active_for_loops: [], # loops "for" ativos em execução
+  each_loops_by_start: {}, # mapa de loops "each" por linha inicial
+  each_loops_by_end: {}, # mapa de loops "each" por linha final
+  active_each_loops: [], # loops "each" ativos em execução
+  while_loops_by_start: {}, # mapa de loops "while" por linha inicial
+  while_loops_by_end: {}, # mapa de loops "while" por linha final
+  active_while_loops: [], # loops "while" ativos em execução
   line_in_method_body: Set.new, # linhas que pertencem ao corpo de métodos
   line_in_class_body: Set.new, # linhas que pertencem ao corpo de classes
   non_exec_top_level_lines: Set.new, # linhas que não devem executar no top-level (ex: def dentro de class)
@@ -152,6 +161,15 @@ load_program = lambda do |program_path| # carrega o programa
   state[:method_ranges] = {} # limpa faixas de métodos
   state[:methods_by_name] = Hash.new { |h, k| h[k] = [] } # limpa índice por nome
   state[:methods_by_owner] = {} # limpa índice por owner
+  state[:for_loops_by_start] = {} # limpa mapa de for por início
+  state[:for_loops_by_end] = {} # limpa mapa de for por fim
+  state[:active_for_loops] = [] # limpa loops ativos
+  state[:each_loops_by_start] = {} # limpa mapa de each por início
+  state[:each_loops_by_end] = {} # limpa mapa de each por fim
+  state[:active_each_loops] = [] # limpa loops each ativos
+  state[:while_loops_by_start] = {} # limpa mapa de while por início
+  state[:while_loops_by_end] = {} # limpa mapa de while por fim
+  state[:active_while_loops] = [] # limpa loops while ativos
   state[:line_in_method_body] = Set.new # limpa marcação de linhas de método
   state[:line_in_class_body] = Set.new # limpa marcação de linhas de classe
   state[:non_exec_top_level_lines] = Set.new # limpa linhas não executáveis no top-level
@@ -163,7 +181,7 @@ load_program = lambda do |program_path| # carrega o programa
 
     if (match = /^def\s+([a-zA-Z_]\w*[!?=]?)(?:\(([^)]*)\))?/.match(stripped)) # início de método
       owner_class = block_stack.reverse.find { |item| item[:type] == 'class' }&.dig(:name) # classe dona do método
-      params = match[2].to_s.split(',').map { |p| p.strip }.reject(&:empty?) # parâmetros simples
+      params = match[2].to_s.split(',').map { |p| p.strip }.reject(&:empty?).map { |p| p.split('=').first.to_s.strip } # parâmetros simples (remove defaults)
       block_stack << { type: 'def', name: match[1], line: line_no, owner_class: owner_class, params: params } # empilha def
       state[:non_exec_top_level_lines].add(line_no) if owner_class # top-level não deve parar em def de classe
       next
@@ -175,7 +193,22 @@ load_program = lambda do |program_path| # carrega o programa
       next
     end
 
-    if /^(module|if|unless|case|begin|while|until|for)\b/.match?(stripped) # outros blocos
+    if (for_match = /^for\s+([a-z_]\w*)\s+in\s+(.+)$/.match(stripped)) # início de loop for
+      block_stack << { type: 'for', line: line_no, var_name: for_match[1], iterable_expr: for_match[2].strip } # empilha for
+      next
+    end
+
+    if (each_match = /^(.+)\.each\s+do\s+\|([a-z_]\w*)\|$/.match(stripped)) # início de each
+      block_stack << { type: 'each', line: line_no, iterable_expr: each_match[1].strip, var_name: each_match[2] } # empilha each
+      next
+    end
+
+    if (while_match = /^while\s+(.+)$/.match(stripped)) # início de while
+      block_stack << { type: 'while', line: line_no, condition_expr: while_match[1].strip } # empilha while
+      next
+    end
+
+    if /^(module|if|unless|case|begin|until)\b/.match?(stripped) # outros blocos
       block_stack << { type: 'block', line: line_no } # empilha bloco genérico
       next
     end
@@ -221,6 +254,44 @@ load_program = lambda do |program_path| # carrega o programa
       }
       state[:class_map] << class_info # adiciona no mapa estrutural de classes
       ((opener[:line] + 1)..line_no).each { |l| state[:line_in_class_body].add(l) } # marca corpo da classe
+      next
+    end
+
+    if opener[:type] == 'for' # fechamento de loop for
+      loop_info = {
+        start_line: opener[:line],
+        body_start: opener[:line] + 1,
+        end_line: line_no,
+        var_name: opener[:var_name],
+        iterable_expr: opener[:iterable_expr]
+      }
+      state[:for_loops_by_start][loop_info[:start_line]] = loop_info
+      state[:for_loops_by_end][loop_info[:end_line]] = loop_info
+      next
+    end
+
+    if opener[:type] == 'each' # fechamento de loop each
+      loop_info = {
+        start_line: opener[:line],
+        body_start: opener[:line] + 1,
+        end_line: line_no,
+        var_name: opener[:var_name],
+        iterable_expr: opener[:iterable_expr]
+      }
+      state[:each_loops_by_start][loop_info[:start_line]] = loop_info
+      state[:each_loops_by_end][loop_info[:end_line]] = loop_info
+      next
+    end
+
+    if opener[:type] == 'while' # fechamento de loop while
+      loop_info = {
+        start_line: opener[:line],
+        body_start: opener[:line] + 1,
+        end_line: line_no,
+        condition_expr: opener[:condition_expr]
+      }
+      state[:while_loops_by_start][loop_info[:start_line]] = loop_info
+      state[:while_loops_by_end][loop_info[:end_line]] = loop_info
     end
   end
 
@@ -287,10 +358,56 @@ load_program = lambda do |program_path| # carrega o programa
   state[:current_line] = state[:first_runtime_line]
 end # fim do load_program
 
+emit_debug_mapping = lambda do # emite mapeamento estrutural ao iniciar sessão
+  classes = state[:class_map] || []
+  methods = state[:method_map] || []
+  for_loops = state[:for_loops_by_start]&.values || []
+  each_loops = state[:each_loops_by_start]&.values || []
+  while_loops = state[:while_loops_by_start]&.values || []
+
+  log_line.call("DEBUG MAP START file=#{state[:program_path]}")
+  log_line.call("DEBUG MAP SUMMARY classes=#{classes.length} methods=#{methods.length} for=#{for_loops.length} each=#{each_loops.length} while=#{while_loops.length}")
+
+  classes.each do |klass|
+    log_line.call("DEBUG MAP CLASS #{klass[:name]} L#{klass[:line_start]}-L#{klass[:line_end]}")
+  end
+
+  methods.each do |method_info|
+    owner = method_info[:owner_class] || 'top-level'
+    log_line.call("DEBUG MAP METHOD #{owner}##{method_info[:name]} L#{method_info[:def_line]}-L#{method_info[:end_line]}")
+  end
+
+  for_loops.each do |loop_info|
+    log_line.call("DEBUG MAP FOR L#{loop_info[:start_line]}-L#{loop_info[:end_line]} var=#{loop_info[:var_name]} in=#{loop_info[:iterable_expr]}")
+  end
+  each_loops.each do |loop_info|
+    log_line.call("DEBUG MAP EACH L#{loop_info[:start_line]}-L#{loop_info[:end_line]} var=#{loop_info[:var_name]} in=#{loop_info[:iterable_expr]}")
+  end
+  while_loops.each do |loop_info|
+    log_line.call("DEBUG MAP WHILE L#{loop_info[:start_line]}-L#{loop_info[:end_line]} cond=#{loop_info[:condition_expr]}")
+  end
+
+  log_line.call("DEBUG MAP END")
+end # fim do emit_debug_mapping
+
 breakpoints_for_program = lambda do # obtém breakpoints do programa
   bp = state[:breakpoints][state[:program_path]] # pega set do arquivo atual
   bp ? bp.to_a.sort : [] # retorna lista ordenada
 end # fim do breakpoints
+
+method_has_breakpoint = lambda do |method_info| # verifica se há breakpoint dentro do método
+  return false unless method_info
+
+  bp_set = state[:breakpoints][state[:program_path]] || Set.new
+  bp_set.any? do |line|
+    line.is_a?(Integer) && line >= method_info[:def_line] && line <= method_info[:end_line]
+  end
+end # fim do method_has_breakpoint
+
+line_has_breakpoint = lambda do |line_no| # verifica breakpoint na linha atual
+  bp_set = state[:breakpoints][state[:program_path]] || Set.new
+  bp_set.include?(line_no)
+end # fim do line_has_breakpoint
 
 find_next_breakpoint = lambda do |start_line| # acha próximo breakpoint
   breakpoints_for_program.call.each do |line| # percorre breakpoints
@@ -393,6 +510,17 @@ resolve_variable_value = lambda do |token, locals, self_obj_id| # resolve token 
   return key[1..-2] if key.start_with?('"') && key.end_with?('"')
   return key.to_i if /\A-?\d+\z/.match?(key)
 
+  if (len_match = /^([a-z_]\w*)\.length$/.match(key)) # suporte a length em arrays/strings
+    base = locals[len_match[1]]
+    return base.length if base.respond_to?(:length)
+  end
+
+  if (idx_match = /^([a-z_]\w*)\[(.+)\]$/.match(key)) # suporte a indexação simples: arr[i]
+    base = locals[idx_match[1]]
+    idx = evaluate_expression.call(idx_match[2], locals, self_obj_id) rescue nil
+    return base[idx] if base.respond_to?(:[]) && idx.is_a?(Integer)
+  end
+
   if key.start_with?('@') # ivar
     obj = self_obj_id ? state[:objects][self_obj_id] : nil
     return obj ? obj[:ivars][key] : nil
@@ -406,6 +534,25 @@ evaluate_expression = lambda do |expression, locals, self_obj_id| # avaliador si
   return nil if expr.empty?
   return expr[1..-2] if expr.start_with?('"') && expr.end_with?('"')
   return expr.to_i if /\A-?\d+\z/.match?(expr)
+  return true if expr == 'true'
+  return false if expr == 'false'
+
+  if (array_match = /\A\[(.*)\]\z/.match(expr)) # array literal simples: [a, 1, "x"]
+    body = array_match[1].to_s.strip
+    return [] if body.empty?
+    return body.split(',').map { |part| evaluate_expression.call(part.strip, locals, self_obj_id) }
+  end
+
+  if (cmp = /\A(.+)\s*(<=|>=|<|>|==|!=)\s*(.+)\z/.match(expr)) # comparações simples
+    left = evaluate_expression.call(cmp[1], locals, self_obj_id)
+    right = evaluate_expression.call(cmp[3], locals, self_obj_id)
+    return left == right if cmp[2] == '=='
+    return left != right if cmp[2] == '!='
+    return left < right if cmp[2] == '<' && left && right
+    return left > right if cmp[2] == '>' && left && right
+    return left <= right if cmp[2] == '<=' && left && right
+    return left >= right if cmp[2] == '>=' && left && right
+  end
 
   if (m = /\A(.+)\s*([\+\-\*\/])\s*(.+)\z/.match(expr)) # operação binária simples
     left = resolve_variable_value.call(m[1], locals, self_obj_id)
@@ -576,16 +723,53 @@ next_executable_line = lambda do |start_line, allow_method_body, max_line = nil|
   nil
 end # fim do next_executable_line
 
+active_for_loop_for_line = lambda do |line_no, call_depth| # encontra loop for ativo no contexto atual
+  state[:active_for_loops].reverse.find do |loop|
+    loop[:call_depth] == call_depth &&
+      line_no >= loop[:body_start] &&
+      line_no <= (loop[:end_line] - 1)
+  end
+end # fim do active_for_loop_for_line
+
+active_for_loop_end_for_line = lambda do |line_no, call_depth| # encontra loop for ativo na linha end
+  state[:active_for_loops].reverse.find do |loop|
+    loop[:call_depth] == call_depth && line_no == loop[:end_line]
+  end
+end # fim do active_for_loop_end_for_line
+
+active_loop_for_line = lambda do |line_no, call_depth| # loop ativo (for/each/while) na linha de corpo
+  loops = state[:active_for_loops] + state[:active_each_loops] + state[:active_while_loops]
+  matches = loops.select do |loop|
+    loop[:call_depth] == call_depth &&
+      line_no >= loop[:body_start] &&
+      line_no <= (loop[:end_line] - 1)
+  end
+  matches.max_by { |loop| loop[:start_line] }
+end # fim do active_loop_for_line
+
+active_loop_end_for_line = lambda do |line_no, call_depth| # loop ativo (for/each/while) na linha end
+  loops = state[:active_for_loops] + state[:active_each_loops] + state[:active_while_loops]
+  matches = loops.select { |loop| loop[:call_depth] == call_depth && line_no == loop[:end_line] }
+  matches.max_by { |loop| loop[:start_line] }
+end # fim do active_loop_end_for_line
+
 advance_execution = lambda do |enter_calls| # avança execução respeitando contexto (top-level/método)
   return false if state[:program_path].nil? || state[:terminated]
 
   current = state[:current_line]
   frame = state[:call_stack].last # frame atual do método (se houver)
   allow_method_body = !frame.nil?
+  current_depth = state[:call_stack].length
+  current_locals_map = current_locals.call
+  current_self_id = current_self_object_id.call
 
   # Se já está no "end" do método, o próximo passo é retornar ao caller
   if frame && current == frame[:end_line]
     finished = state[:call_stack].pop
+    depth = state[:call_stack].length
+    state[:active_for_loops].reject! { |loop| loop[:call_depth] > depth } # limpa loops do frame encerrado
+    state[:active_each_loops].reject! { |loop| loop[:call_depth] > depth } # limpa loops each do frame encerrado
+    state[:active_while_loops].reject! { |loop| loop[:call_depth] > depth } # limpa loops while do frame encerrado
     if finished[:return_line]
       state[:current_line] = finished[:return_line]
       return true
@@ -595,12 +779,202 @@ advance_execution = lambda do |enter_calls| # avança execução respeitando con
     return false
   end
 
+  # Ao parar no end de loop, decide próxima iteração/saída
+  if (loop_end_frame = active_loop_end_for_line.call(current, current_depth))
+    if %w[for each].include?(loop_end_frame[:kind])
+      if loop_end_frame[:index] + 1 < loop_end_frame[:values].length
+        loop_end_frame[:index] += 1
+        current_locals_map[loop_end_frame[:var_name]] = loop_end_frame[:values][loop_end_frame[:index]]
+        restart_line = next_executable_line.call(loop_end_frame[:body_start], allow_method_body, loop_end_frame[:end_line] - 1)
+        if restart_line
+          state[:current_line] = restart_line
+          return true
+        end
+      end
+    elsif loop_end_frame[:kind] == 'while'
+      condition = evaluate_expression.call(loop_end_frame[:condition_expr], current_locals_map, current_self_id)
+      if condition
+        restart_line = next_executable_line.call(loop_end_frame[:body_start], allow_method_body, loop_end_frame[:end_line] - 1)
+        if restart_line
+          state[:current_line] = restart_line
+          return true
+        end
+      end
+    end
+
+    state[:active_for_loops].delete(loop_end_frame)
+    state[:active_each_loops].delete(loop_end_frame)
+    state[:active_while_loops].delete(loop_end_frame)
+    after_loop = next_executable_line.call(loop_end_frame[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+    if after_loop
+      state[:current_line] = after_loop
+      return true
+    end
+  end
+
   # stepIn/continue: se linha atual chama método conhecido, entra no corpo
   line_text = state[:lines][current - 1] || ''
-  called_range = resolve_call_target.call(line_text)
-  constructor_call = line_text.match?(/[A-Z]\w*(?:::[A-Z]\w*)*\.new\s*(?:\(|$)/) # regra: todo new entra em initialize
 
-  if (enter_calls || constructor_call) && called_range
+  # Suporte a loop for: entra no corpo e itera até o fim
+  if (loop_info = state[:for_loops_by_start][current])
+    iterable_value = evaluate_expression.call(loop_info[:iterable_expr], current_locals_map, current_self_id)
+    values = if iterable_value.nil?
+      []
+    elsif iterable_value.is_a?(Array)
+      iterable_value
+    elsif iterable_value.respond_to?(:to_a)
+      iterable_value.to_a
+    else
+      [iterable_value]
+    end
+
+    if values.empty? # loop vazio: pula para a linha após o end
+      next_after_loop = next_executable_line.call(loop_info[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+      if next_after_loop
+        state[:current_line] = next_after_loop
+        return true
+      end
+      state[:current_line] = frame[:end_line] if frame
+      send_terminated.call unless frame
+      return !frame.nil?
+    end
+
+    loop_frame = {
+      kind: 'for',
+      start_line: loop_info[:start_line],
+      body_start: loop_info[:body_start],
+      end_line: loop_info[:end_line],
+      var_name: loop_info[:var_name],
+      values: values,
+      index: 0,
+      call_depth: current_depth
+    }
+    log_line.call("LOOP FOR START L#{loop_frame[:start_line]} values=#{loop_frame[:values].inspect}")
+    state[:active_for_loops] << loop_frame
+    current_locals_map[loop_frame[:var_name]] = loop_frame[:values][0]
+
+    first_body_line = next_executable_line.call(loop_frame[:body_start], allow_method_body, loop_frame[:end_line] - 1)
+    if first_body_line
+      state[:current_line] = first_body_line
+      return true
+    end
+
+    # Corpo vazio: encerra loop imediatamente
+    state[:active_for_loops].delete(loop_frame)
+    next_after_loop = next_executable_line.call(loop_frame[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+    if next_after_loop
+      state[:current_line] = next_after_loop
+      return true
+    end
+    state[:current_line] = frame[:end_line] if frame
+    send_terminated.call unless frame
+    return !frame.nil?
+  end
+
+  # Suporte a loop each: entra no corpo e itera até o fim
+  if (loop_info = state[:each_loops_by_start][current])
+    iterable_value = evaluate_expression.call(loop_info[:iterable_expr], current_locals_map, current_self_id)
+    values = if iterable_value.nil?
+      []
+    elsif iterable_value.is_a?(Array)
+      iterable_value
+    elsif iterable_value.respond_to?(:to_a)
+      iterable_value.to_a
+    else
+      [iterable_value]
+    end
+
+    if values.empty?
+      next_after_loop = next_executable_line.call(loop_info[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+      if next_after_loop
+        state[:current_line] = next_after_loop
+        return true
+      end
+      state[:current_line] = frame[:end_line] if frame
+      send_terminated.call unless frame
+      return !frame.nil?
+    end
+
+    loop_frame = {
+      kind: 'each',
+      start_line: loop_info[:start_line],
+      body_start: loop_info[:body_start],
+      end_line: loop_info[:end_line],
+      var_name: loop_info[:var_name],
+      values: values,
+      index: 0,
+      call_depth: current_depth
+    }
+    log_line.call("LOOP EACH START L#{loop_frame[:start_line]} values=#{loop_frame[:values].inspect}")
+    state[:active_each_loops] << loop_frame
+    current_locals_map[loop_frame[:var_name]] = loop_frame[:values][0]
+
+    first_body_line = next_executable_line.call(loop_frame[:body_start], allow_method_body, loop_frame[:end_line] - 1)
+    if first_body_line
+      state[:current_line] = first_body_line
+      return true
+    end
+
+    state[:active_each_loops].delete(loop_frame)
+    next_after_loop = next_executable_line.call(loop_frame[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+    if next_after_loop
+      state[:current_line] = next_after_loop
+      return true
+    end
+    state[:current_line] = frame[:end_line] if frame
+    send_terminated.call unless frame
+    return !frame.nil?
+  end
+
+  # Suporte a loop while: avalia condição para entrar/sair
+  if (loop_info = state[:while_loops_by_start][current])
+    condition = evaluate_expression.call(loop_info[:condition_expr], current_locals_map, current_self_id)
+    log_line.call("LOOP WHILE CHECK L#{loop_info[:start_line]} condition=#{condition.inspect}")
+    unless condition
+      next_after_loop = next_executable_line.call(loop_info[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+      if next_after_loop
+        state[:current_line] = next_after_loop
+        return true
+      end
+      state[:current_line] = frame[:end_line] if frame
+      send_terminated.call unless frame
+      return !frame.nil?
+    end
+
+    loop_frame = state[:active_while_loops].find { |loop| loop[:call_depth] == current_depth && loop[:start_line] == loop_info[:start_line] }
+    unless loop_frame
+      loop_frame = {
+        kind: 'while',
+        start_line: loop_info[:start_line],
+        body_start: loop_info[:body_start],
+        end_line: loop_info[:end_line],
+        condition_expr: loop_info[:condition_expr],
+        call_depth: current_depth
+      }
+      state[:active_while_loops] << loop_frame
+    end
+
+    first_body_line = next_executable_line.call(loop_frame[:body_start], allow_method_body, loop_frame[:end_line] - 1)
+    if first_body_line
+      state[:current_line] = first_body_line
+      return true
+    end
+
+    state[:active_while_loops].delete(loop_frame)
+    next_after_loop = next_executable_line.call(loop_frame[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+    if next_after_loop
+      state[:current_line] = next_after_loop
+      return true
+    end
+    state[:current_line] = frame[:end_line] if frame
+    send_terminated.call unless frame
+    return !frame.nil?
+  end
+
+  called_range = resolve_call_target.call(line_text)
+  should_enter_called_method = called_range && (enter_calls || method_has_breakpoint.call(called_range))
+
+  if should_enter_called_method
     caller_locals = current_locals.call # locals de quem fez a chamada
     caller_self_object_id = current_self_object_id.call
     call_self_object_id = nil # self do método chamado
@@ -665,9 +1039,17 @@ advance_execution = lambda do |enter_calls| # avança execução respeitando con
 
   # Avanço normal (step over) dentro do frame atual
   max_line = frame ? frame[:end_line] - 1 : nil
+  loop_frame = active_loop_for_line.call(current, current_depth)
+  max_line = [max_line, loop_frame[:end_line] - 1].compact.min if loop_frame
   candidate = next_executable_line.call(current + 1, allow_method_body, max_line)
   if candidate
     state[:current_line] = candidate
+    return true
+  end
+
+  # Fim da iteração de loop: para no end antes de iterar/sair
+  if loop_frame
+    state[:current_line] = loop_frame[:end_line]
     return true
   end
 
@@ -684,10 +1066,49 @@ end # fim do advance_execution
 step_one = lambda do # step over de uma linha executável
   return if state[:program_path].nil? || state[:terminated]
 
+  # Semântica de Step Over:
+  # - executa chamadas da linha atual por baixo dos panos
+  # - para em breakpoint interno, se existir
+  # - sem breakpoint, para na próxima linha do mesmo frame
+  current = state[:current_line]
+  frame = state[:call_stack].last
+  allow_method_body = !frame.nil?
+  line_text = state[:lines][current - 1] || ''
+  called_range = resolve_call_target.call(line_text)
+
+  if called_range
+    target_depth = state[:call_stack].length
+    target_line = next_executable_line.call(current + 1, allow_method_body, frame ? frame[:end_line] : nil)
+
+    moved = advance_execution.call(true)
+    while moved && !state[:terminated]
+      if line_has_breakpoint.call(state[:current_line])
+        send_stopped.call('breakpoint')
+        return
+      end
+
+      reached_target = state[:call_stack].length == target_depth && (!target_line.nil? && state[:current_line] == target_line)
+      returned_to_caller = target_line.nil? && state[:call_stack].length < target_depth
+      if reached_target
+        send_stopped.call('step')
+        return
+      end
+      if returned_to_caller
+        send_stopped.call('step')
+        return
+      end
+
+      moved = advance_execution.call(true)
+    end
+
+    return
+  end
+
   moved = advance_execution.call(false)
 
   if moved
-    send_stopped.call('step')
+    reason = line_has_breakpoint.call(state[:current_line]) ? 'breakpoint' : 'step'
+    send_stopped.call(reason)
   end
 end # fim do step_one
 
@@ -697,7 +1118,8 @@ step_in_execution = lambda do # stepIn com tentativa de entrar em método
   moved = advance_execution.call(true)
 
   if moved
-    send_stopped.call('step')
+    reason = line_has_breakpoint.call(state[:current_line]) ? 'breakpoint' : 'step'
+    send_stopped.call(reason)
   end
 end # fim do step_in_execution
 
@@ -754,6 +1176,7 @@ handle_request = lambda do |request| # trata request DAP
     send_response.call(request, {}) # responde vazio
   when 'configurationDone' # configurationDone
     send_response.call(request, {}) # responde
+    emit_debug_mapping.call # sempre mapeia primeiro ao iniciar o debug
     # Comportamento estilo Rails: só para quando atingir breakpoint.
     # Sem breakpoint, executa do início ao fim e termina.
     continue_execution.call(true)
@@ -800,8 +1223,9 @@ handle_request = lambda do |request| # trata request DAP
         { name: 'text', value: line_text.inspect, variablesReference: 0 }
       ]
 
-      locals.keys.map(&:to_s).sort.each do |name|
+      locals.keys.map(&:to_s).uniq.sort.each do |name|
         value = locals[name]
+        value = locals[name.to_sym] if value.nil? && locals.respond_to?(:key?) && locals.key?(name.to_sym)
         child_ref = is_object_ref.call(value) ? object_variables_reference.call(value[:id]) : 0
         vars << { name: name, value: format_value.call(value), variablesReference: child_ref }
       end
@@ -825,8 +1249,9 @@ handle_request = lambda do |request| # trata request DAP
       }) # responde
     elsif variables_ref == 2 # globals/top-level
       vars = []
-      state[:top_locals].keys.map(&:to_s).sort.each do |name|
+      state[:top_locals].keys.map(&:to_s).uniq.sort.each do |name|
         value = state[:top_locals][name]
+        value = state[:top_locals][name.to_sym] if value.nil? && state[:top_locals].respond_to?(:key?) && state[:top_locals].key?(name.to_sym)
         child_ref = is_object_ref.call(value) ? object_variables_reference.call(value[:id]) : 0
         vars << { name: name, value: format_value.call(value), variablesReference: child_ref }
       end
