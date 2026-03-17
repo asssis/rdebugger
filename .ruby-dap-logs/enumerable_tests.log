@@ -1,0 +1,113 @@
+[2026-03-16 21:22:22.721] ==== start run_enumerable_examples ====
+[2026-03-16 21:22:22.722] [ENUM LOG] base numbers=[1, 2, 3, 4, 5] words=["ana", "bob", "carol", "davi"]
+[2026-03-16 21:22:22.722] [ENUM LOG] starting each family
+[2026-03-16 21:22:22.722] [ENUM LOG] each {} n=1 doubled=2
+[2026-03-16 21:22:22.722] [ENUM LOG] each {} n=2 doubled=4
+[2026-03-16 21:22:22.722] [ENUM LOG] each {} n=3 doubled=6
+[2026-03-16 21:22:22.722] [ENUM LOG] each {} n=4 doubled=8
+[2026-03-16 21:22:22.722] [ENUM LOG] each {} n=5 doubled=10
+[2026-03-16 21:22:22.722] [ENUM LOG] each do n=1 plus_ten=11
+[2026-03-16 21:22:22.722] [ENUM LOG] each do n=2 plus_ten=12
+[2026-03-16 21:22:22.722] [ENUM LOG] each do n=3 plus_ten=13
+[2026-03-16 21:22:22.722] [ENUM LOG] each do n=4 plus_ten=14
+[2026-03-16 21:22:22.722] [ENUM LOG] each do n=5 plus_ten=15
+[2026-03-16 21:22:22.722] [ENUM LOG] starting map family
+[2026-03-16 21:22:22.722] [ENUM LOG] map! n=1 mapped=3
+[2026-03-16 21:22:22.722] [ENUM LOG] map! n=2 mapped=6
+[2026-03-16 21:22:22.722] [ENUM LOG] map! n=3 mapped=9
+[2026-03-16 21:22:22.722] [ENUM LOG] map! n=4 mapped=12
+[2026-03-16 21:22:22.722] [ENUM LOG] map! n=5 mapped=15
+[2026-03-16 21:22:22.722] [ENUM LOG] collect! n=1 mapped=3
+[2026-03-16 21:22:22.722] [ENUM LOG] collect! n=2 mapped=4
+[2026-03-16 21:22:22.722] [ENUM LOG] collect! n=3 mapped=5
+[2026-03-16 21:22:22.722] [ENUM LOG] collect! n=4 mapped=6
+[2026-03-16 21:22:22.722] [ENUM LOG] collect! n=5 mapped=7
+[2026-03-16 21:22:22.722] [ENUM LOG] starting select/filter family
+[2026-03-16 21:22:22.722] [ENUM LOG] starting find family
+[2026-03-16 21:22:22.722] [ENUM LOG] starting predicate family
+[2026-03-16 21:22:22.722] [ENUM LOG] starting size/count family
+[2026-03-16 21:22:22.722] [ENUM LOG] starting reduce/inject family
+[2026-03-16 21:22:22.722] [ENUM LOG] starting grouping/splitting family
+[2026-03-16 21:22:22.723] [ENUM LOG] starting sorting/reverse family
+[2026-03-16 21:22:22.723] [ENUM LOG] starting min/max family
+[2026-03-16 21:22:22.723] [ENUM LOG] starting take/drop family
+[2026-03-16 21:22:22.723] [ENUM LOG] starting first/last family
+[2026-03-16 21:22:22.723] [ENUM LOG] starting cycle family
+[2026-03-16 21:22:22.723] [ENUM LOG] cycle yielded=1
+[2026-03-16 21:22:22.723] [ENUM LOG] cycle yielded=2
+[2026-03-16 21:22:22.723] [ENUM LOG] cycle yielded=1
+[2026-03-16 21:22:22.723] [ENUM LOG] cycle yielded=2
+[2026-03-16 21:22:22.723] [ENUM LOG] starting zip family
+[2026-03-16 21:22:22.723] [ENUM LOG] starting conversions family
+[2026-03-16 21:22:22.723] [ENUM LOG] starting misc family
+[2026-03-16 21:22:22.724] [ENUM LOG] finished all calculations, running assertions
+[2026-03-16 21:22:22.724] [OK] each_with_index
+[2026-03-16 21:22:22.725] [OK] each_entry
+[2026-03-16 21:22:22.725] [OK] each_slice
+[2026-03-16 21:22:22.725] [OK] each_cons
+[2026-03-16 21:22:22.726] [OK] each_with_object
+[2026-03-16 21:22:22.726] [OK] each_direct
+[2026-03-16 21:22:22.726] [OK] each_do
+[2026-03-16 21:22:22.726] [OK] map
+[2026-03-16 21:22:22.726] [OK] map_bang
+[2026-03-16 21:22:22.726] [OK] collect
+[2026-03-16 21:22:22.726] [OK] collect_bang
+[2026-03-16 21:22:22.726] [OK] flat_map
+[2026-03-16 21:22:22.726] [OK] filter_map
+[2026-03-16 21:22:22.726] [OK] select
+[2026-03-16 21:22:22.726] [OK] filter
+[2026-03-16 21:22:22.726] [OK] reject
+[2026-03-16 21:22:22.726] [OK] grep
+[2026-03-16 21:22:22.726] [OK] grep_v
+[2026-03-16 21:22:22.726] [OK] find
+[2026-03-16 21:22:22.726] [OK] detect
+[2026-03-16 21:22:22.726] [OK] find_all
+[2026-03-16 21:22:22.726] [OK] find_index
+[2026-03-16 21:22:22.726] [OK] any
+[2026-03-16 21:22:22.726] [OK] all
+[2026-03-16 21:22:22.726] [OK] none
+[2026-03-16 21:22:22.726] [OK] one
+[2026-03-16 21:22:22.726] [OK] include
+[2026-03-16 21:22:22.726] [OK] member
+[2026-03-16 21:22:22.726] [OK] count
+[2026-03-16 21:22:22.726] [OK] size
+[2026-03-16 21:22:22.726] [OK] length
+[2026-03-16 21:22:22.726] [OK] tally
+[2026-03-16 21:22:22.726] [OK] reduce
+[2026-03-16 21:22:22.726] [OK] inject
+[2026-03-16 21:22:22.726] [OK] group_by
+[2026-03-16 21:22:22.726] [OK] partition
+[2026-03-16 21:22:22.727] [OK] chunk
+[2026-03-16 21:22:22.727] [OK] chunk_while
+[2026-03-16 21:22:22.727] [OK] slice_when
+[2026-03-16 21:22:22.727] [OK] sort
+[2026-03-16 21:22:22.727] [OK] sort_bang
+[2026-03-16 21:22:22.727] [OK] sort_by
+[2026-03-16 21:22:22.727] [OK] reverse
+[2026-03-16 21:22:22.727] [OK] reverse_each
+[2026-03-16 21:22:22.727] [OK] min
+[2026-03-16 21:22:22.727] [OK] max
+[2026-03-16 21:22:22.727] [OK] minmax
+[2026-03-16 21:22:22.727] [OK] min_by
+[2026-03-16 21:22:22.727] [OK] max_by
+[2026-03-16 21:22:22.727] [OK] minmax_by
+[2026-03-16 21:22:22.727] [OK] take
+[2026-03-16 21:22:22.727] [OK] take_while
+[2026-03-16 21:22:22.727] [OK] drop
+[2026-03-16 21:22:22.727] [OK] drop_while
+[2026-03-16 21:22:22.727] [OK] first
+[2026-03-16 21:22:22.727] [OK] last
+[2026-03-16 21:22:22.727] [OK] cycle
+[2026-03-16 21:22:22.727] [OK] zip
+[2026-03-16 21:22:22.727] [OK] to_a
+[2026-03-16 21:22:22.727] [OK] to_h
+[2026-03-16 21:22:22.727] [OK] entries
+[2026-03-16 21:22:22.727] [OK] sum
+[2026-03-16 21:22:22.727] [OK] uniq
+[2026-03-16 21:22:22.727] [OK] uniq_bang
+[2026-03-16 21:22:22.727] [OK] compact
+[2026-03-16 21:22:22.727] [OK] compact_bang
+[2026-03-16 21:22:22.727] [OK] flatten
+[2026-03-16 21:22:22.727] [OK] flatten_bang
+[2026-03-16 21:22:22.727] [TEST SUMMARY] total=68 ok=68 erro=0
+[2026-03-16 21:22:22.727] ==== end run_enumerable_examples ====

@@ -54,9 +54,13 @@ state = { # estado do debugger
   each_loops_by_start: {}, # mapa de loops "each" por linha inicial
   each_loops_by_end: {}, # mapa de loops "each" por linha final
   active_each_loops: [], # loops "each" ativos em execução
+  collection_loops_by_start: {}, # mapa de blocos select!/map! por linha inicial
+  collection_loops_by_end: {}, # mapa de blocos select!/map! por linha final
+  active_collection_loops: [], # blocos select!/map! ativos em execução
   while_loops_by_start: {}, # mapa de loops "while" por linha inicial
   while_loops_by_end: {}, # mapa de loops "while" por linha final
   active_while_loops: [], # loops "while" ativos em execução
+  conditional_skip_markers: [], # marcadores para pular ramos else/elsif após if verdadeiro
   line_in_method_body: Set.new, # linhas que pertencem ao corpo de métodos
   line_in_class_body: Set.new, # linhas que pertencem ao corpo de classes
   non_exec_top_level_lines: Set.new, # linhas que não devem executar no top-level (ex: def dentro de class)
@@ -173,9 +177,13 @@ load_program = lambda do |program_path| # carrega o programa
   state[:each_loops_by_start] = {} # limpa mapa de each por início
   state[:each_loops_by_end] = {} # limpa mapa de each por fim
   state[:active_each_loops] = [] # limpa loops each ativos
+  state[:collection_loops_by_start] = {} # limpa mapa de select!/map! por início
+  state[:collection_loops_by_end] = {} # limpa mapa de select!/map! por fim
+  state[:active_collection_loops] = [] # limpa blocos select!/map! ativos
   state[:while_loops_by_start] = {} # limpa mapa de while por início
   state[:while_loops_by_end] = {} # limpa mapa de while por fim
   state[:active_while_loops] = [] # limpa loops while ativos
+  state[:conditional_skip_markers] = [] # limpa marcadores de if/else
   state[:line_in_method_body] = Set.new # limpa marcação de linhas de método
   state[:line_in_class_body] = Set.new # limpa marcação de linhas de classe
   state[:non_exec_top_level_lines] = Set.new # limpa linhas não executáveis no top-level
@@ -210,12 +218,24 @@ load_program = lambda do |program_path| # carrega o programa
       next
     end
 
+    if (collection_match = /^(?:([a-z_]\w*)\s*=\s*)?([a-z_]\w*)\.(select!?|map!?)\s+do\s+\|([a-z_]\w*)\|$/.match(stripped)) # início de select/map em bloco
+      block_stack << {
+        type: 'collection_block',
+        line: line_no,
+        target_var: collection_match[1],
+        array_var: collection_match[2],
+        op: collection_match[3],
+        var_name: collection_match[4]
+      }
+      next
+    end
+
     if (while_match = /^while\s+(.+)$/.match(stripped)) # início de while
       block_stack << { type: 'while', line: line_no, condition_expr: while_match[1].strip } # empilha while
       next
     end
 
-    if /^(module|if|unless|case|begin|until)\b/.match?(stripped) # outros blocos
+    if /^(module|if|unless|case|begin|until)\b/.match?(stripped) || stripped.match?(/\bdo\b\s*(\|.*\|)?$/) # outros blocos (inclui lambda do/end)
       block_stack << { type: 'block', line: line_no } # empilha bloco genérico
       next
     end
@@ -303,6 +323,22 @@ load_program = lambda do |program_path| # carrega o programa
       }
       state[:while_loops_by_start][loop_key.call(program_path, loop_info[:start_line])] = loop_info
       state[:while_loops_by_end][loop_key.call(program_path, loop_info[:end_line])] = loop_info
+      next
+    end
+
+    if opener[:type] == 'collection_block' # fechamento de select/map em bloco
+      loop_info = {
+        start_line: opener[:line],
+        body_start: opener[:line] + 1,
+        end_line: line_no,
+        source_path: program_path,
+        target_var: opener[:target_var],
+        array_var: opener[:array_var],
+        op: opener[:op],
+        var_name: opener[:var_name]
+      }
+      state[:collection_loops_by_start][loop_key.call(program_path, loop_info[:start_line])] = loop_info
+      state[:collection_loops_by_end][loop_key.call(program_path, loop_info[:end_line])] = loop_info
     end
   end
 
@@ -370,12 +406,24 @@ load_program = lambda do |program_path| # carrega o programa
         next
       end
 
+      if (collection_match = /^(?:([a-z_]\w*)\s*=\s*)?([a-z_]\w*)\.(select!?|map!?)\s+do\s+\|([a-z_]\w*)\|$/.match(stripped))
+        block_stack << {
+          type: 'collection_block',
+          line: line_no,
+          target_var: collection_match[1],
+          array_var: collection_match[2],
+          op: collection_match[3],
+          var_name: collection_match[4]
+        }
+        next
+      end
+
       if (while_match = /^while\s+(.+)$/.match(stripped))
         block_stack << { type: 'while', line: line_no, condition_expr: while_match[1].strip }
         next
       end
 
-      if /^(module|if|unless|case|begin|until)\b/.match?(stripped)
+      if /^(module|if|unless|case|begin|until)\b/.match?(stripped) || stripped.match?(/\bdo\b\s*(\|.*\|)?$/)
         block_stack << { type: 'block', line: line_no }
         next
       end
@@ -447,6 +495,19 @@ load_program = lambda do |program_path| # carrega o programa
         }
         state[:while_loops_by_start][loop_key.call(source_path, loop_info[:start_line])] = loop_info
         state[:while_loops_by_end][loop_key.call(source_path, loop_info[:end_line])] = loop_info
+      elsif opener[:type] == 'collection_block'
+        loop_info = {
+          start_line: opener[:line],
+          body_start: opener[:line] + 1,
+          end_line: line_no,
+          source_path: source_path,
+          target_var: opener[:target_var],
+          array_var: opener[:array_var],
+          op: opener[:op],
+          var_name: opener[:var_name]
+        }
+        state[:collection_loops_by_start][loop_key.call(source_path, loop_info[:start_line])] = loop_info
+        state[:collection_loops_by_end][loop_key.call(source_path, loop_info[:end_line])] = loop_info
       end
     end
   end
@@ -785,6 +846,53 @@ evaluate_expression = lambda do |expression, locals, self_obj_id| # avaliador si
   return true if expr == 'true'
   return false if expr == 'false'
 
+  if (select_match = /^([a-z_]\w*)\.select\s*\{\s*\|([a-z_]\w*)\|\s*(.+)\s*\}$/.match(expr)) # select inline
+    array_var = select_match[1]
+    iter_var = select_match[2]
+    predicate = select_match[3].strip
+    base = lookup_local.call(locals, array_var)
+    return [] unless base.is_a?(Array)
+
+    previous_iter = lookup_local.call(locals, iter_var)
+    had_iter = !previous_iter.nil?
+    out = []
+    base.each do |item|
+      locals[iter_var] = item
+      keep = evaluate_expression.call(predicate, locals, self_obj_id)
+      out << item if keep
+    end
+    if had_iter
+      locals[iter_var] = previous_iter
+    else
+      locals.delete(iter_var)
+      locals.delete(iter_var.to_sym)
+    end
+    return out
+  end
+
+  if (map_match = /^([a-z_]\w*)\.map\s*\{\s*\|([a-z_]\w*)\|\s*(.+)\s*\}$/.match(expr)) # map inline
+    array_var = map_match[1]
+    iter_var = map_match[2]
+    mapper = map_match[3].strip
+    base = lookup_local.call(locals, array_var)
+    return [] unless base.is_a?(Array)
+
+    previous_iter = lookup_local.call(locals, iter_var)
+    had_iter = !previous_iter.nil?
+    out = []
+    base.each do |item|
+      locals[iter_var] = item
+      out << evaluate_expression.call(mapper, locals, self_obj_id)
+    end
+    if had_iter
+      locals[iter_var] = previous_iter
+    else
+      locals.delete(iter_var)
+      locals.delete(iter_var.to_sym)
+    end
+    return out
+  end
+
   if (array_match = /\A\[(.*)\]\z/.match(expr)) # array literal simples: [a, 1, "x"]
     body = array_match[1].to_s.strip
     return [] if body.empty?
@@ -1082,6 +1190,96 @@ next_executable_line = lambda do |start_line, allow_method_body, max_line = nil|
   nil
 end # fim do next_executable_line
 
+block_opener_line = lambda do |text| # identifica linhas que abrem blocos fechados por end
+  return false if text.empty? || text.start_with?('#')
+  return true if /^(if|unless|case|begin|class|module|def|while|until|for)\b/.match?(text)
+  text.match?(/\bdo\b\s*(\|.*\|)?$/) && !text.start_with?('elsif ')
+end # fim do block_opener_line
+
+find_conditional_block = lambda do |start_line, source_path, allow_method_body| # localiza estrutura de if/unless
+  source_lines = state[:sources][source_path] || state[:lines]
+  start_text = (source_lines[start_line - 1] || '').sub(/#.*$/, '').strip
+  start_match = /^(if|unless)\s+(.+)$/.match(start_text)
+  return nil unless start_match
+
+  depth = 0
+  else_line = nil
+  elsif_lines = []
+  end_line = nil
+
+  ((start_line + 1)..source_lines.length).each do |line_no|
+    stripped = (source_lines[line_no - 1] || '').sub(/#.*$/, '').strip
+    next if stripped.empty?
+
+    if block_opener_line.call(stripped)
+      depth += 1
+      next
+    end
+
+    if stripped == 'end'
+      if depth.zero?
+        end_line = line_no
+        break
+      end
+      depth -= 1
+      next
+    end
+
+    next unless depth.zero?
+
+    if stripped == 'else'
+      else_line = line_no
+    elsif (elsif_match = /^elsif\s+(.+)$/.match(stripped))
+      elsif_lines << { line: line_no, condition_expr: elsif_match[1].strip }
+    end
+  end
+
+  return nil unless end_line
+
+  branch_markers = (elsif_lines.map { |item| item[:line] } + [else_line, end_line]).compact.sort
+  true_branch_end = (branch_markers.first || end_line) - 1
+  true_body_line = next_executable_line.call(start_line + 1, allow_method_body, true_branch_end)
+
+  elsif_with_body = elsif_lines.each_with_index.map do |item, idx|
+    next_marker = if idx + 1 < elsif_lines.length
+      elsif_lines[idx + 1][:line]
+    elsif else_line
+      else_line
+    else
+      end_line
+    end
+    body_line = next_executable_line.call(item[:line] + 1, allow_method_body, next_marker - 1)
+    item.merge(body_line: body_line)
+  end
+
+  else_body_line = if else_line
+    next_executable_line.call(else_line + 1, allow_method_body, end_line - 1)
+  end
+
+  {
+    type: start_match[1],
+    condition_expr: start_match[2].strip,
+    start_line: start_line,
+    end_line: end_line,
+    else_line: else_line,
+    elsif_lines: elsif_with_body,
+    true_body_line: true_body_line,
+    else_body_line: else_body_line
+  }
+end # fim do find_conditional_block
+
+consume_conditional_skip_marker = lambda do |line_no, call_depth, source_path| # consome marcador de pulo de else/elsif
+  marker = state[:conditional_skip_markers].reverse.find do |item|
+    item[:call_depth] == call_depth &&
+      item[:source_path] == source_path &&
+      item[:branch_lines].include?(line_no)
+  end
+  return nil unless marker
+
+  state[:conditional_skip_markers].delete(marker)
+  marker
+end # fim do consume_conditional_skip_marker
+
 active_for_loop_for_line = lambda do |line_no, call_depth, source_path| # encontra loop for ativo no contexto atual
   state[:active_for_loops].reverse.find do |loop|
     loop[:call_depth] == call_depth &&
@@ -1100,7 +1298,7 @@ active_for_loop_end_for_line = lambda do |line_no, call_depth, source_path| # en
 end # fim do active_for_loop_end_for_line
 
 active_loop_for_line = lambda do |line_no, call_depth, source_path| # loop ativo (for/each/while) na linha de corpo
-  loops = state[:active_for_loops] + state[:active_each_loops] + state[:active_while_loops]
+  loops = state[:active_for_loops] + state[:active_each_loops] + state[:active_collection_loops] + state[:active_while_loops]
   matches = loops.select do |loop|
     loop[:call_depth] == call_depth &&
       loop[:source_path] == source_path &&
@@ -1118,7 +1316,7 @@ active_loop_for_line = lambda do |line_no, call_depth, source_path| # loop ativo
 end # fim do active_loop_for_line
 
 active_loop_end_for_line = lambda do |line_no, call_depth, source_path| # loop ativo (for/each/while) na linha end
-  loops = state[:active_for_loops] + state[:active_each_loops] + state[:active_while_loops]
+  loops = state[:active_for_loops] + state[:active_each_loops] + state[:active_collection_loops] + state[:active_while_loops]
   matches = loops.select do |loop|
     loop[:call_depth] == call_depth &&
       loop[:source_path] == source_path &&
@@ -1150,18 +1348,22 @@ advance_execution = lambda do |enter_calls| # avança execução respeitando con
     depth = state[:call_stack].length
     state[:active_for_loops].reject! { |loop| loop[:call_depth] > depth } # limpa loops do frame encerrado
     state[:active_each_loops].reject! { |loop| loop[:call_depth] > depth } # limpa loops each do frame encerrado
+    state[:active_collection_loops].reject! { |loop| loop[:call_depth] > depth } # limpa loops select!/map! do frame encerrado
     state[:active_while_loops].reject! { |loop| loop[:call_depth] > depth } # limpa loops while do frame encerrado
+    state[:conditional_skip_markers].reject! { |item| item[:call_depth] > depth } # limpa marcadores de if/else do frame encerrado
     if finished[:return_line]
       state[:current_source_path] = finished[:return_source_path] || state[:main_program_path]
       state[:current_line] = finished[:return_line]
       return true
     end
 
-    # Sem return_line explícita: volta para o fim do frame chamador
+    # Sem return_line explícita: volta para o end do frame chamador.
+    # Importante: NÃO usar caller_frame[:return_line], pois isso "pula" o restante do
+    # método chamador e pode causar reentradas/loops estranhos no call site.
     caller_frame = state[:call_stack].last
     if caller_frame
-      state[:current_source_path] = caller_frame[:source_path] || caller_frame[:return_source_path] || state[:main_program_path]
-      state[:current_line] = caller_frame[:return_line] || caller_frame[:end_line]
+      state[:current_source_path] = finished[:return_source_path] || caller_frame[:source_path] || state[:main_program_path]
+      state[:current_line] = caller_frame[:end_line]
       return true
     end
 
@@ -1172,7 +1374,16 @@ advance_execution = lambda do |enter_calls| # avança execução respeitando con
   # Ao parar no end de loop, decide próxima iteração/saída
   if (loop_end_frame = active_loop_end_for_line.call(current, current_depth, current_source))
     log_line.call("LOOP END HIT kind=#{loop_end_frame[:kind]} L#{loop_end_frame[:end_line]} idx=#{loop_end_frame[:index].inspect} source=#{current_source}")
-    if %w[for each].include?(loop_end_frame[:kind])
+    if %w[for each select select! map map!].include?(loop_end_frame[:kind])
+      current_item = loop_end_frame[:values][loop_end_frame[:index]]
+      if %w[select select!].include?(loop_end_frame[:kind]) && loop_end_frame[:block_expr]
+        keep = evaluate_expression.call(loop_end_frame[:block_expr], current_locals_map, current_self_id)
+        loop_end_frame[:selected] << current_item if keep
+      elsif %w[map map!].include?(loop_end_frame[:kind]) && loop_end_frame[:block_expr]
+        mapped_value = evaluate_expression.call(loop_end_frame[:block_expr], current_locals_map, current_self_id)
+        loop_end_frame[:mapped] << mapped_value
+      end
+
       if loop_end_frame[:index] + 1 < loop_end_frame[:values].length
         loop_end_frame[:index] += 1
         current_locals_map[loop_end_frame[:var_name]] = loop_end_frame[:values][loop_end_frame[:index]]
@@ -1194,8 +1405,19 @@ advance_execution = lambda do |enter_calls| # avança execução respeitando con
       end
     end
 
+    if loop_end_frame[:kind] == 'select!' # finaliza mutação do select!
+      current_locals_map[loop_end_frame[:array_var]] = loop_end_frame[:selected]
+    elsif loop_end_frame[:kind] == 'map!' # finaliza mutação do map!
+      current_locals_map[loop_end_frame[:array_var]] = loop_end_frame[:mapped]
+    elsif loop_end_frame[:kind] == 'select' # finaliza retorno do select (sem mutar origem)
+      current_locals_map[loop_end_frame[:target_var]] = loop_end_frame[:selected] if loop_end_frame[:target_var]
+    elsif loop_end_frame[:kind] == 'map' # finaliza retorno do map (sem mutar origem)
+      current_locals_map[loop_end_frame[:target_var]] = loop_end_frame[:mapped] if loop_end_frame[:target_var]
+    end
+
     state[:active_for_loops].delete(loop_end_frame)
     state[:active_each_loops].delete(loop_end_frame)
+    state[:active_collection_loops].delete(loop_end_frame)
     state[:active_while_loops].delete(loop_end_frame)
     after_loop = next_executable_line.call(loop_end_frame[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
     if after_loop
@@ -1207,6 +1429,73 @@ advance_execution = lambda do |enter_calls| # avança execução respeitando con
   # stepIn/continue: se linha atual chama método conhecido, entra no corpo
   current_lines = state[:sources][state[:current_source_path]] || state[:lines]
   line_text = current_lines[current - 1] || ''
+  stripped_line = line_text.to_s.sub(/#.*$/, '').strip
+
+  # Se veio de um ramo verdadeiro, pula elsif/else restantes
+  if (marker = consume_conditional_skip_marker.call(current, current_depth, current_source))
+    after_conditional = next_executable_line.call(marker[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+    if after_conditional
+      state[:current_line] = after_conditional
+      return true
+    end
+    state[:current_line] = frame[:end_line] if frame
+    send_terminated.call unless frame
+    return !frame.nil?
+  end
+
+  # Suporte a if/unless para não executar ambos os ramos
+  if (conditional_match = /^(if|unless)\s+(.+)$/.match(stripped_line))
+    conditional_info = find_conditional_block.call(current, current_source, allow_method_body)
+    if conditional_info
+      condition = evaluate_expression.call(conditional_info[:condition_expr], current_locals_map, current_self_id)
+      condition = !condition if conditional_match[1] == 'unless'
+
+      target_line = nil
+      branch_lines_to_skip = []
+
+      if condition
+        target_line = conditional_info[:true_body_line]
+        branch_lines_to_skip = conditional_info[:elsif_lines].map { |item| item[:line] }
+        branch_lines_to_skip << conditional_info[:else_line] if conditional_info[:else_line]
+      else
+        selected_elsif = conditional_info[:elsif_lines].find do |item|
+          evaluate_expression.call(item[:condition_expr], current_locals_map, current_self_id)
+        end
+
+        if selected_elsif
+          target_line = selected_elsif[:body_line]
+          idx = conditional_info[:elsif_lines].index(selected_elsif)
+          branch_lines_to_skip = conditional_info[:elsif_lines][(idx + 1)..].to_a.map { |item| item[:line] }
+          branch_lines_to_skip << conditional_info[:else_line] if conditional_info[:else_line]
+        elsif conditional_info[:else_line]
+          target_line = conditional_info[:else_body_line]
+        end
+      end
+
+      if branch_lines_to_skip.any?
+        state[:conditional_skip_markers] << {
+          call_depth: current_depth,
+          source_path: current_source,
+          end_line: conditional_info[:end_line],
+          branch_lines: branch_lines_to_skip
+        }
+      end
+
+      if target_line
+        state[:current_line] = target_line
+        return true
+      end
+
+      after_conditional = next_executable_line.call(conditional_info[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+      if after_conditional
+        state[:current_line] = after_conditional
+        return true
+      end
+      state[:current_line] = frame[:end_line] if frame
+      send_terminated.call unless frame
+      return !frame.nil?
+    end
+  end
 
   # Suporte a loop for: entra no corpo e itera até o fim
   if (loop_info = state[:for_loops_by_start]["#{current_source}|#{current}"])
@@ -1321,6 +1610,71 @@ advance_execution = lambda do |enter_calls| # avança execução respeitando con
     return !frame.nil?
   end
 
+  # Suporte a blocos select/map com do...end
+  if (loop_info = state[:collection_loops_by_start]["#{current_source}|#{current}"])
+    iterable_value = lookup_local.call(current_locals_map, loop_info[:array_var])
+    values = iterable_value.is_a?(Array) ? iterable_value.dup : []
+
+    if values.empty?
+      if %w[select! map!].include?(loop_info[:op])
+        current_locals_map[loop_info[:array_var]] = []
+      elsif %w[select map].include?(loop_info[:op]) && loop_info[:target_var]
+        current_locals_map[loop_info[:target_var]] = []
+      end
+      next_after_loop = next_executable_line.call(loop_info[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+      if next_after_loop
+        state[:current_line] = next_after_loop
+        return true
+      end
+      state[:current_line] = frame[:end_line] if frame
+      send_terminated.call unless frame
+      return !frame.nil?
+    end
+
+    first_body_line = next_executable_line.call(loop_info[:body_start], allow_method_body, loop_info[:end_line] - 1)
+    block_expr = first_body_line ? (current_lines[first_body_line - 1] || '').strip : nil
+
+    loop_frame = {
+      kind: loop_info[:op],
+      start_line: loop_info[:start_line],
+      body_start: loop_info[:body_start],
+      end_line: loop_info[:end_line],
+      source_path: current_source,
+      target_var: loop_info[:target_var],
+      array_var: loop_info[:array_var],
+      var_name: loop_info[:var_name],
+      values: values,
+      index: 0,
+      block_expr: block_expr,
+      selected: [],
+      mapped: [],
+      call_depth: current_depth
+    }
+    log_line.call("LOOP #{loop_frame[:kind]} START L#{loop_frame[:start_line]} values=#{loop_frame[:values].inspect}")
+    state[:active_collection_loops] << loop_frame
+    current_locals_map[loop_frame[:var_name]] = loop_frame[:values][0]
+
+    if first_body_line
+      state[:current_line] = first_body_line
+      return true
+    end
+
+    state[:active_collection_loops].delete(loop_frame)
+    if %w[select! map!].include?(loop_frame[:kind])
+      current_locals_map[loop_frame[:array_var]] = []
+    elsif %w[select map].include?(loop_frame[:kind]) && loop_frame[:target_var]
+      current_locals_map[loop_frame[:target_var]] = []
+    end
+    next_after_loop = next_executable_line.call(loop_frame[:end_line] + 1, allow_method_body, frame ? frame[:end_line] - 1 : nil)
+    if next_after_loop
+      state[:current_line] = next_after_loop
+      return true
+    end
+    state[:current_line] = frame[:end_line] if frame
+    send_terminated.call unless frame
+    return !frame.nil?
+  end
+
   # Suporte a loop while: avalia condição para entrar/sair
   if (loop_info = state[:while_loops_by_start]["#{current_source}|#{current}"])
     condition = evaluate_expression.call(loop_info[:condition_expr], current_locals_map, current_self_id)
@@ -1379,6 +1733,7 @@ advance_execution = lambda do |enter_calls| # avança execução respeitando con
     caller_self_object_id = current_self_object_id.call
     call_self_object_id = nil # self do método chamado
     arg_values = [] # argumentos avaliados
+    raw_args_text = nil
     call_text = line_text.to_s.sub(/#.*$/, '').strip # normaliza chamada (remove indent/comentário)
 
     if (ctor_match = /^(?:([a-z_]\w*)\s*=\s*)?([A-Z]\w*(?:::[A-Z]\w*)*)\.new\s*(?:\((.*)\))?/.match(call_text))
@@ -1392,20 +1747,29 @@ advance_execution = lambda do |enter_calls| # avança execução respeitando con
       caller_locals[assign_var] = object_ref.call(object_id) if assign_var
 
       call_self_object_id = object_id
+      raw_args_text = args_text
       arg_values = parse_arguments.call(args_text, caller_locals, caller_self_object_id)
     elsif (recv_match = /([a-z_]\w*)\.([a-zA-Z_]\w*[!?=]?)\s*(?:\((.*)\))?/.match(call_text))
       receiver_value = caller_locals[recv_match[1]]
       call_self_object_id = receiver_value[:id] if is_object_ref.call(receiver_value)
+      raw_args_text = recv_match[3]
       arg_values = parse_arguments.call(recv_match[3], caller_locals, caller_self_object_id)
     elsif (plain_match = /^([a-zA-Z_]\w*[!?=]?)\s*(?:\((.*)\))?/.match(call_text))
       call_self_object_id = caller_self_object_id
+      raw_args_text = plain_match[2]
       arg_values = parse_arguments.call(plain_match[2], caller_locals, caller_self_object_id)
+    end
+
+    # Fallback defensivo: se parser não gerou argumentos, tenta avaliar expressão única
+    if arg_values.empty? && raw_args_text && !raw_args_text.strip.empty? && (called_range[:params] || []).length == 1
+      arg_values = [evaluate_expression.call(raw_args_text.strip, caller_locals, caller_self_object_id)]
     end
 
     frame_locals = {}
     (called_range[:params] || []).each_with_index do |param_name, idx|
       frame_locals[param_name] = arg_values[idx]
     end
+    log_line.call("CALL #{called_range[:owner_class] || 'top-level'}##{called_range[:name]} args=#{arg_values.inspect}")
 
     # Chamada dentro de loop deve retornar ao end do loop (não pular para depois dele)
     loop_context = active_loop_for_line.call(current, current_depth, current_source)
